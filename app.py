@@ -356,16 +356,43 @@ try:
         colx, coly = st.columns(2)
         with colx:
             ds_out = lab_da.to_dataset(name="cluster")
-            # Simpan ke buffer bytes agar kompatibel dengan st.download_button
-            buf = io.BytesIO()
-            ds_out.to_netcdf(buf)
-            buf.seek(0)
-            st.download_button(
-                "💾 Download cluster.nc",
-                data=buf.getvalue(),
-                file_name="cluster_map.nc",
-                mime="application/x-netcdf",
-            )
+            # Beberapa engine xarray dapat mengembalikan bytes/memoryview atau menulis ke file.
+            # Tangani semua kemungkinan agar kompatibel dengan st.download_button.
+            fnc = ds_out.to_netcdf()
+            data_bytes = None
+            try:
+                if isinstance(fnc, (bytes, bytearray, memoryview)):
+                    data_bytes = bytes(fnc)
+                elif isinstance(fnc, str):
+                    # fnc adalah path file
+                    with open(fnc, "rb") as f:
+                        data_bytes = f.read()
+                else:
+                    # Fallback: tulis ke file sementara lalu baca
+                    import tempfile, os
+                    tmpf = tempfile.NamedTemporaryFile(suffix=".nc", delete=False)
+                    tmpf.close()
+                    ds_out.to_netcdf(tmpf.name)
+                    with open(tmpf.name, "rb") as f:
+                        data_bytes = f.read()
+                    try:
+                        os.remove(tmpf.name)
+                    except Exception:
+                        pass
+            except Exception as e_read:
+                st.error(f"Gagal menyiapkan file NetCDF untuk diunduh: {e_read}")
+                data_bytes = None
+
+            if data_bytes is not None:
+                st.download_button(
+                    "💾 Download cluster.nc",
+                    data=data_bytes,
+                    file_name="cluster_map.nc",
+                    mime="application/x-netcdf",
+                )
+            else:
+                st.warning("File cluster.nc tidak tersedia untuk diunduh.")
+
         with coly:
             df_out = df_lab.reset_index().melt(id_vars=df_lab.index.names, var_name=lab_da.dims[1], value_name="cluster")
             csv = df_out.to_csv(index=False)
@@ -373,6 +400,9 @@ try:
             st.download_button(
                 "📄 Download cluster.csv",
                 data=csv.encode("utf-8"),
+                file_name="cluster_map.csv",
+                mime="text/csv",
+            ),
                 file_name="cluster_map.csv",
                 mime="text/csv",
             )
