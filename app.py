@@ -15,6 +15,8 @@ import xarray as xr
 import pandas as pd
 import streamlit as st
 from sklearn.cluster import KMeans
+from sklearn.utils.extmath import randomized_svd
+import scipy.linalg as sla
 import plotly.express as px
 import plotly.graph_objects as go
 
@@ -98,10 +100,30 @@ def _area_weight(lat_vals: np.ndarray):
 
 
 def _compute_eof(da: xr.DataArray, lat_name: str, lon_name: str, time_name: str, n_modes: int):
-    """Hitung EOF via SVD. Return dict: patterns[modes, lat, lon], pcs[time, modes], varfrac[modes]."""
+    """Hitung EOF via SVD. Return dict: patterns[modes, lat, lon], pcs[time, modes], varfrac[modes].
+
+    Perbaikan yang ditambahkan:
+    - Tangani NaN/Inf dengan np.nan_to_num
+    - Normalisasi kolom sebelum SVD untuk kestabilan numerik
+    - Coba scipy.linalg.svd (gesvd -> gesdd), jika gagal pakai randomized_svd sebagai fallback
+    - Jika ukuran grid sangat besar, lakukan coarsen sederhana sebelum perhitungan
+    """
     # Format: (time, lat, lon)
     da = da.transpose(time_name, lat_name, lon_name)
     T, Ny, Nx = da.shape
+
+    # Jika grid sangat besar, coarsen sedikit agar SVD lebih stabil/buildable
+    # Threshold ini bisa diubah sesuai resource
+    max_space = 30000
+    if Ny * Nx > max_space:
+        # Gunakan coarsen faktor 2 bila memungkinkan
+        cf_lat = 2 if Ny >= 4 else 1
+        cf_lon = 2 if Nx >= 4 else 1
+        if cf_lat > 1 or cf_lon > 1:
+            st.warning(f"Grid besar (Ny*Nx={Ny*Nx}). Melakukan coarsen sementara faktor lat={cf_lat}, lon={cf_lon} untuk stabilitas.")
+            da = da.coarsen({lat_name: cf_lat, lon_name: cf_lon}, boundary="trim").mean()
+            T, Ny, Nx = da.shape
+
     X = da.values.reshape(T, Ny * Nx)
 
     # Hilangkan mean waktu
@@ -113,9 +135,35 @@ def _compute_eof(da: xr.DataArray, lat_name: str, lon_name: str, time_name: str,
     W = np.repeat(sw[:, None], Nx, axis=1).reshape(1, Ny * Nx)
     Xw = X * W  # time x space
 
-    # SVD
-    # Xw = U S V^T ; EOF patterns (tak berbobot) dari V, PCs dari U*S
-    U, s, Vt = np.linalg.svd(Xw, full_matrices=False)
+    # Tangani NaN/Inf
+    Xw = np.nan_to_num(Xw, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Normalisasi kolom (opsional) untuk kestabilan numerik
+    col_std = Xw.std(axis=0)
+    small_std = col_std < 1e-12
+    col_std[small_std] = 1.0
+    Xw = (Xw - Xw.mean(axis=0, keepdims=True)) / col_std
+
+    # Lakukan SVD dengan beberapa fallback
+    U = s = Vt = None
+    svd_error = None
+    try:
+        U, s, Vt = sla.svd(Xw, full_matrices=False, lapack_driver="gesvd")
+    except Exception as e1:
+        svd_error = e1
+        try:
+            U, s, Vt = sla.svd(Xw, full_matrices=False, lapack_driver="gesdd")
+        except Exception as e2:
+            svd_error = e2
+            # Fallback: randomized SVD (tergantung scikit-learn)
+            try:
+                k = min(max(n_modes, 20), min(Xw.shape) - 1)
+                if k <= 0:
+                    raise RuntimeError("Dimensi SVD terlalu kecil untuk randomized_svd")
+                U, s, Vt = randomized_svd(Xw, n_components=k, n_iter=5, random_state=42)
+            except Exception as e3:
+                svd_error = e3
+                raise RuntimeError(f"SVD gagal (semua metode). Error terakhir: {svd_error}")
 
     # Variance explained
     lam = s**2
@@ -134,7 +182,9 @@ def _compute_eof(da: xr.DataArray, lat_name: str, lon_name: str, time_name: str,
     for k in range(m):
         vk = Vt_m[k, :].reshape(Ny, Nx)
         # Balikkan pembobotan: bagi sqrt(cos(lat))
-        vk_unw = vk / np.repeat(sw[:, None], Nx, axis=1)
+        sw_rep = np.repeat(sw[:, None], Nx, axis=1)
+        sw_rep[sw_rep == 0] = 1.0  # hindari pembagian 0
+        vk_unw = vk / sw_rep
         patterns.append(vk_unw)
     patterns = np.stack(patterns, axis=0)  # m x Ny x Nx
 
