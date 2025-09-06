@@ -356,12 +356,26 @@ try:
         colx, coly = st.columns(2)
         with colx:
             ds_out = lab_da.to_dataset(name="cluster")
-            fnc = ds_out.to_netcdf()
-            st.download_button("💾 Download cluster.nc", data=fnc, file_name="cluster_map.nc", mime="application/x-netcdf")
+            # Simpan ke buffer bytes agar kompatibel dengan st.download_button
+            buf = io.BytesIO()
+            ds_out.to_netcdf(buf)
+            buf.seek(0)
+            st.download_button(
+                "💾 Download cluster.nc",
+                data=buf.getvalue(),
+                file_name="cluster_map.nc",
+                mime="application/x-netcdf",
+            )
         with coly:
             df_out = df_lab.reset_index().melt(id_vars=df_lab.index.names, var_name=lab_da.dims[1], value_name="cluster")
             csv = df_out.to_csv(index=False)
-            st.download_button("📄 Download cluster.csv", data=csv, file_name="cluster_map.csv", mime="text/csv")
+            # Untuk keamanan, kirim sebagai bytes
+            st.download_button(
+                "📄 Download cluster.csv",
+                data=csv.encode("utf-8"),
+                file_name="cluster_map.csv",
+                mime="text/csv",
+            )
 
     st.markdown("---")
     with st.expander("📚 Catatan Metodologi"):
